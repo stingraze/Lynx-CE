@@ -2,71 +2,74 @@
 #include "winsock2.h"   // Local winsock2.h in the same directory
 #include <stdio.h>
 #include <string.h>
-#include <ctype.h>
 
-/*
- (C)Tsubasa Kato - Inspire Search Corporation - 2024/12/30
- Coded with the help of ChatGPT - o1.
- * A more advanced text-based "browser" for Windows CE (or Win32) demonstrating:
- *   - Link parsing: <a href="...">some text</a>
- *   - Naive form parsing: <form method="..." action="..."> + <input name="..." type="text">
- *   - Navigation: g=Go URL, l=List links, pick link, f=Fill form, q=Quit
- *
- * This is extremely naive. Real HTML is much more complex.
- * Also, we only do plain HTTP, no HTTPS. We do not handle chunked
- * encoding, redirection, cookies, etc.
- *
- * Compile with CeGCC (ARM example):
- *   arm-mingw32ce-gcc -Wall -I. -o browser.exe browser.c
- * If you get link errors, try adding -lws2 or -lcoredll.
- * If you get "not a valid application" on the device, it's likely
- * a CPU or subsystem mismatch.
- */
-
+// Define HTTP port
 #define HTTP_PORT 80
 
-// A small struct to store discovered links
+// Structure to store discovered links
 typedef struct {
     char text[128];
     char url[512];
 } Link;
 
-// A small struct to store an extremely naive form
+// Structure to store a naive form
 typedef struct {
-    char method[16];        // e.g. "GET" or "POST"
-    char action[512];       // e.g. "http://example.com/search"
-    char inputName[64];     // e.g. "q"
-    int  found;             // Did we find a form or not?
+    char method[16];        // e.g., "GET" or "POST"
+    char action[512];       // e.g., "http://example.com/search"
+    char inputName[64];     // e.g., "q"
+    int  found;             // Flag to indicate if a form was found
 } FormInfo;
 
-// We store discovered links in an array
+// Global variables to store links and form information
 static Link gLinks[100];
 static int  gNumLinks = 0;
-
-// We store a single naive form
 static FormInfo gForm;
 
-//------------------------------------------------------------------------------
-// Strips out naive HTML tags: everything between < and > is removed.
-// We do not preserve <a> or <form> etc. for display, but we do parse them separately.
+// Minimal 'tolower' replacement for ASCII, without <ctype.h>
+static char my_lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        c = c + ('a' - 'A');
+    }
+    return c;
+}
+
+// Custom case-insensitive substring search (replaces strcasestr)
+static char* my_strcasestr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char*)haystack;  // If needle is empty, match at start
+
+    for (; *haystack; haystack++) {
+        // Compare first characters (case-insensitive)
+        if (my_lower(*haystack) == my_lower(*needle)) {
+            const char *h = haystack + 1;
+            const char *n = needle + 1;
+            while (*n && *h && (my_lower(*h) == my_lower(*n))) {
+                h++;
+                n++;
+            }
+            if (!*n) {
+                // Reached end of needle => match found
+                return (char*)haystack;
+            }
+        }
+    }
+    return NULL;
+}
+
+// Strips out naive HTML tags: everything between < and > is removed
 static void strip_html_tags(char *buffer)
 {
     char *r = buffer;
     char *w = buffer;
     int in_tag = 0;
 
-    while (*r)
-    {
-        if (*r == '<')
-        {
+    while (*r) {
+        if (*r == '<') {
             in_tag = 1;
-        }
-        else if (*r == '>')
-        {
+        } else if (*r == '>') {
             in_tag = 0;
-        }
-        else if (!in_tag)
-        {
+        } else if (!in_tag) {
             *w++ = *r;
         }
         r++;
@@ -74,27 +77,23 @@ static void strip_html_tags(char *buffer)
     *w = '\0';
 }
 
-//------------------------------------------------------------------------------
-// Convert a string to lowercase (in-place).
+// Convert entire string to lower-case using my_lower, in place
 static void strlower(char *s)
 {
     while (*s) {
-        *s = (char)tolower((unsigned char)*s);
+        *s = my_lower(*s);
         s++;
     }
 }
 
-//------------------------------------------------------------------------------
-// Parse out <a href="..."> LinkText </a> and store in gLinks[].
-// Also parse out <form ...> and <input ...> (very naive).
-// Then we can strip out everything else for display.
+// Parse out <a href="...">LinkText</a> and store in gLinks[]
+// Also parse out <form ...> and <input ...> (very naive)
 static void parse_links_and_form(char *html)
 {
     gNumLinks = 0;
     memset(&gForm, 0, sizeof(gForm));
 
-    // A naive approach: we scan for <a href="..."> or <form ...> or <input ...>
-    // We'll do this in a loop. This is not a real HTML parser. It's extremely naive.
+    // Scan for <a href="..."> or <form ...> or <input ...>
     char *p = html;
 
     while (1)
@@ -104,7 +103,6 @@ static void parse_links_and_form(char *html)
         char *tagEnd = strstr(tagStart, ">");
         if (!tagEnd) break;
 
-        // We'll examine the substring [tagStart, tagEnd]
         int tagLen = (int)(tagEnd - tagStart + 1);
         if (tagLen < 3) {
             p = tagEnd + 1;
@@ -116,11 +114,11 @@ static void parse_links_and_form(char *html)
         int copyLen = (tagLen >= 1023) ? 1023 : tagLen;
         strncpy(tagBuf, tagStart, copyLen);
         tagBuf[copyLen] = '\0';
-        strlower(tagBuf);  // make it easier to parse
+        strlower(tagBuf);  // Easier to parse in lower-case
 
-        // Check if it's <a ...
+        // <a ...
         if (strncmp(tagBuf, "<a ", 3) == 0) {
-            // find href="
+            // Find href="
             char *hrefPos = strstr(tagBuf, "href=");
             if (hrefPos) {
                 // Usually it's href="someURL"
@@ -128,7 +126,6 @@ static void parse_links_and_form(char *html)
                 if (quote1) {
                     char *quote2 = strchr(quote1+1, '\"');
                     if (quote2) {
-                        // We found the URL between quote1+1 and quote2
                         int urlLen = (int)(quote2 - (quote1+1));
                         if (urlLen > 0 && urlLen < (int)sizeof(gLinks[gNumLinks].url)-1) {
                             strncpy(gLinks[gNumLinks].url, quote1+1, urlLen);
@@ -137,11 +134,9 @@ static void parse_links_and_form(char *html)
                     }
                 }
             }
-            // next, we find the link text by searching after the > up to </a>
-            // but we only do a naive approach: skip the entire tag, then read until we see "</a>"
-            // So let's do that:
+            // Find link text after the tagEnd, up to </a>
             char *linkTextStart = tagEnd + 1;
-            char *endTag = strcasestr(linkTextStart, "</a>");
+            char *endTag = my_strcasestr(linkTextStart, "</a>");
             if (endTag) {
                 int txtLen = (int)(endTag - linkTextStart);
                 if (txtLen < 0) txtLen = 0;
@@ -150,29 +145,24 @@ static void parse_links_and_form(char *html)
                 }
                 strncpy(gLinks[gNumLinks].text, linkTextStart, txtLen);
                 gLinks[gNumLinks].text[txtLen] = '\0';
-                // strip newlines from link text
-                // also strip leading/trailing spaces
-                // or we can do something naive:
-                // We'll just do it minimal:
+
+                // Replace \r or \n with spaces
                 for (int i = 0; i < (int)strlen(gLinks[gNumLinks].text); i++) {
-                    if (gLinks[gNumLinks].text[i] == '\r' ||
-                        gLinks[gNumLinks].text[i] == '\n')
-                    {
+                    if (gLinks[gNumLinks].text[i] == '\r' || gLinks[gNumLinks].text[i] == '\n') {
                         gLinks[gNumLinks].text[i] = ' ';
                     }
                 }
-                // We advanced one link
                 gNumLinks++;
-                if (gNumLinks >= 100) gNumLinks = 99;  // arbitrary limit
+                if (gNumLinks >= 100) gNumLinks = 99; // Arbitrary limit
             }
         }
-        // Check if it's <form ...
+        // <form ...
         else if (strncmp(tagBuf, "<form", 5) == 0) {
-            // find method= and action=
-            // e.g. <form method="get" action="http://example.com/search">
             gForm.found = 1;
-            // default to GET if not found
+            // Default to "get"
             strcpy(gForm.method, "get");
+
+            // Parse method=
             char *methodPos = strstr(tagBuf, "method=");
             if (methodPos) {
                 char *q1 = strchr(methodPos, '\"');
@@ -188,6 +178,7 @@ static void parse_links_and_form(char *html)
                     }
                 }
             }
+            // Parse action=
             char *actionPos = strstr(tagBuf, "action=");
             if (actionPos) {
                 char *q1 = strchr(actionPos, '\"');
@@ -203,10 +194,9 @@ static void parse_links_and_form(char *html)
                 }
             }
         }
-        // Check if it's <input ...
-        // We'll only parse name= if type=text or omitted
+        // <input ...
         else if (strncmp(tagBuf, "<input", 6) == 0 && gForm.found) {
-            // find name=
+            // Find name=
             char *namePos = strstr(tagBuf, "name=");
             if (namePos) {
                 char *q1 = strchr(namePos, '\"');
@@ -221,7 +211,6 @@ static void parse_links_and_form(char *html)
                     }
                 }
             }
-            // For full correctness, we'd also check type="text", but let's skip.
         }
 
         // Move p past this tag
@@ -229,17 +218,16 @@ static void parse_links_and_form(char *html)
     }
 }
 
-//------------------------------------------------------------------------------
-// Minimal function to parse a URL like "http://example.com/path" into host+path.
+// Minimal function to parse "http://host/path" into host+path.
 static int parse_http_url(const char *url, char *host, char *path, int maxLen)
 {
     if (strncmp(url, "http://", 7) != 0) {
-        return -1; // only handle http://
+        return -1; // Only handle http://
     }
     const char *p = url + 7;
     const char *slash = strchr(p, '/');
     if (!slash) {
-        // no slash => host only
+        // No slash => host only
         strncpy(host, p, maxLen);
         host[maxLen-1] = '\0';
         strcpy(path, "/");
@@ -248,13 +236,13 @@ static int parse_http_url(const char *url, char *host, char *path, int maxLen)
         if (hlen <= 0 || hlen >= maxLen) return -1;
         strncpy(host, p, hlen);
         host[hlen] = '\0';
+
         strncpy(path, slash, maxLen);
         path[maxLen-1] = '\0';
     }
     return 0;
 }
 
-//------------------------------------------------------------------------------
 // Core fetch function: do HTTP GET or POST, read response, parse links & forms, strip HTML for display.
 static void fetch_page(const char *url, const char *postData)
 {
@@ -295,8 +283,7 @@ static void fetch_page(const char *url, const char *postData)
         return;
     }
 
-    // Build request
-    // If postData != NULL, we do a POST, else GET.
+    // Build request (POST if postData != NULL, else GET)
     char request[2048];
     if (postData) {
         // POST
@@ -328,8 +315,8 @@ static void fetch_page(const char *url, const char *postData)
         return;
     }
 
-    // We'll read the entire response into a large buffer. This is naive, but workable for a demo.
-    static char bigBuf[65536]; // 64 KB max, watch out
+    // Read the entire response into a large buffer. Very naive.
+    static char bigBuf[65536]; // 64 KB max
     int totalReceived = 0;
     while (1) {
         if (totalReceived >= (int)sizeof(bigBuf)-1) break;
@@ -338,10 +325,9 @@ static void fetch_page(const char *url, const char *postData)
         totalReceived += r;
     }
     bigBuf[totalReceived] = '\0';
-
     closesocket(s);
 
-    // We want to skip headers. Look for \r\n\r\n
+    // Skip headers
     char *body = strstr(bigBuf, "\r\n\r\n");
     if (!body) {
         printf("No HTTP body found.\n");
@@ -349,28 +335,24 @@ static void fetch_page(const char *url, const char *postData)
     }
     body += 4;
 
-    // 1) Parse links and form info from the raw HTML
+    // 1) Parse links and form info
     parse_links_and_form(body);
 
-    // 2) For display, we do a copy, strip tags
-    //    (But we just reuse "body" in place, or better copy it so we don't lose link parse data)
+    // 2) Make a copy for display, removing HTML tags
     static char displayBuf[65536];
     strncpy(displayBuf, body, sizeof(displayBuf)-1);
     displayBuf[sizeof(displayBuf)-1] = '\0';
 
     strip_html_tags(displayBuf);
 
-    // 3) Print the text
+    // 3) Print
     printf("----- Page Text -----\n%s\n----- End -----\n", displayBuf);
 }
 
-//------------------------------------------------------------------------------
 // Global variable storing the "current URL" so user can follow links easily.
-static char gCurrentURL[512] = "http://example.com/";
+static char gCurrentURL[512] = "";  // Start with empty URL
 
-//------------------------------------------------------------------------------
-// A naive function to resolve relative links (e.g. "about.html") into an absolute "http://host/about.html" 
-// If link starts with "http://" we keep it. Otherwise, we just append to current host. 
+// Make absolute URL if link is relative. If link starts with "http://" we keep it.
 static void make_absolute_url(const char *baseURL, const char *link, char *out, int outSize)
 {
     if (strncmp(link, "http://", 7) == 0) {
@@ -378,22 +360,19 @@ static void make_absolute_url(const char *baseURL, const char *link, char *out, 
         strncpy(out, link, outSize);
         out[outSize-1] = '\0';
     } else {
-        // We'll parse base, extract host, then append link
-        // Real code handles directories, etc. We'll do naive approach: base always is "http://host"
+        // Parse base, extract host, then append link
         char baseHost[256], basePath[512];
         if (parse_http_url(baseURL, baseHost, basePath, 256) == 0) {
-            // e.g. "http://example.com/..."
             snprintf(out, outSize, "http://%s%s", baseHost, link);
         } else {
-            // fallback
+            // Fallback
             strncpy(out, link, outSize);
             out[outSize-1] = '\0';
         }
     }
 }
 
-//------------------------------------------------------------------------------
-// Let's do the main interactive loop
+// Interactive loop
 int main(void)
 {
     // Initialize Winsock
@@ -403,23 +382,22 @@ int main(void)
         return 1;
     }
 
-    printf("Welcome to CE-Lynx Advanced Demo\n");
+    printf("Welcome to CE-Lynx Advanced Demo (No Automatic Navigation)\n");
     printf("Commands:\n");
     printf("  g = Go to a new URL\n");
     printf("  l = List discovered links on current page, pick one to follow\n");
     printf("  f = If there's a form, fill text input & submit\n");
     printf("  q = Quit\n");
 
-    // Start by fetching gCurrentURL
-    fetch_page(gCurrentURL, NULL);
+    printf("\nPress 'g' to enter a URL or 'q' to quit.\n");
 
     while (1) {
-        printf("\nCurrent URL: %s\n", gCurrentURL);
+        printf("\nCurrent URL: %s\n", gCurrentURL[0] ? gCurrentURL : "None");
         printf("Command (g/l/f/q) > ");
         fflush(stdout);
 
         int c = getchar();
-        // discard extra input until newline
+        // Discard the rest of the line
         while (getchar() != '\n') { /* discard */ }
 
         if (c == 'q' || c == 'Q') {
@@ -427,15 +405,19 @@ int main(void)
             break;
         }
         else if (c == 'g' || c == 'G') {
-            // Prompt for a new URL
+            // Prompt for new URL
             printf("Enter URL (http://...): ");
             fflush(stdout);
             char url[512];
             if (!fgets(url, sizeof(url), stdin)) {
+                printf("Error reading URL.\n");
                 continue;
             }
-            url[strcspn(url, "\r\n")] = '\0'; // remove newline
-            if (url[0] == '\0') continue;
+            url[strcspn(url, "\r\n")] = '\0'; // Remove trailing newline
+            if (url[0] == '\0') {
+                printf("Empty URL entered.\n");
+                continue;
+            }
 
             strncpy(gCurrentURL, url, sizeof(gCurrentURL));
             gCurrentURL[sizeof(gCurrentURL)-1] = '\0';
@@ -443,76 +425,80 @@ int main(void)
             fetch_page(gCurrentURL, NULL);
         }
         else if (c == 'l' || c == 'L') {
-            // List links, pick one
+            // List links
             if (gNumLinks == 0) {
                 printf("No links found on this page.\n");
             } else {
-                // display them
                 for (int i = 0; i < gNumLinks; i++) {
                     printf("[%d] %s => %s\n", i+1, gLinks[i].text, gLinks[i].url);
                 }
                 printf("Enter link number to follow: ");
                 fflush(stdout);
+
                 char buf[32];
                 if (!fgets(buf, sizeof(buf), stdin)) continue;
                 int choice = atoi(buf);
                 if (choice < 1 || choice > gNumLinks) {
                     printf("Invalid link index.\n");
                 } else {
-                    // Make absolute
                     char absURL[512];
                     make_absolute_url(gCurrentURL, gLinks[choice-1].url, absURL, sizeof(absURL));
                     strncpy(gCurrentURL, absURL, sizeof(gCurrentURL));
+                    gCurrentURL[sizeof(gCurrentURL)-1] = '\0';
                     fetch_page(gCurrentURL, NULL);
                 }
             }
         }
         else if (c == 'f' || c == 'F') {
-            // Check if there's a found form (gForm.found)
+            // If we found a form
             if (!gForm.found) {
                 printf("No form found on this page.\n");
             } else {
-                // We have gForm.method, gForm.action, gForm.inputName
-                // Prompt user for text input
                 printf("Form method=%s, action=%s\n", gForm.method, gForm.action);
                 printf("Input name=%s\n", gForm.inputName);
                 printf("Enter text for input: ");
                 fflush(stdout);
-                char userText[256];
-                if (!fgets(userText, sizeof(userText), stdin)) continue;
-                userText[strcspn(userText, "\r\n")] = '\0';
 
-                // If GET: we build ?inputName=urlEncoded(userText)
-                // If POST: we build post body inputName=urlEncoded(userText)
-                // We'll do minimal URL encoding (replace ' ' with '+', skip others).
+                char userText[256];
+                if (!fgets(userText, sizeof(userText), stdin)) {
+                    printf("Error reading input.\n");
+                    continue;
+                }
+                userText[strcspn(userText, "\r\n")] = '\0'; // Remove trailing newline
+
+                // Naive URL-encode: replace ' ' with '+', non-alnum with %XX
                 char enc[512] = {0};
                 int idx = 0;
                 for (int i = 0; i < (int)strlen(userText) && idx < (int)sizeof(enc)-4; i++) {
                     char ch = userText[i];
                     if (ch == ' ') {
                         enc[idx++] = '+';
-                    } else if (isalnum((unsigned char)ch)) {
+                    }
+                    else if ((ch >= '0' && ch <= '9') ||
+                             (ch >= 'A' && ch <= 'Z') ||
+                             (ch >= 'a' && ch <= 'z'))
+                    {
                         enc[idx++] = ch;
                     } else {
-                        // do %XX?
+                        // Do %XX
                         idx += snprintf(enc+idx, sizeof(enc)-idx, "%%%02X", (unsigned char)ch);
                     }
                 }
 
+                // Make absolute action URL
                 char fullURL[512];
                 make_absolute_url(gCurrentURL, gForm.action, fullURL, sizeof(fullURL));
 
+                // Determine if GET or POST
                 if (strcmp(gForm.method, "post") == 0) {
-                    // e.g. inputName=enc
+                    // POST: inputName=enc
                     char postData[512];
                     snprintf(postData, sizeof(postData), "%s=%s", gForm.inputName, enc);
-                    // fetch with POST
                     strncpy(gCurrentURL, fullURL, sizeof(gCurrentURL));
                     gCurrentURL[sizeof(gCurrentURL)-1] = '\0';
                     fetch_page(gCurrentURL, postData);
                 } else {
-                    // assume GET
-                    // e.g. fullURL + ?inputName=enc
+                    // Assume GET: append ?inputName=enc
                     char getURL[512];
                     snprintf(getURL, sizeof(getURL), "%s?%s=%s", fullURL, gForm.inputName, enc);
                     strncpy(gCurrentURL, getURL, sizeof(gCurrentURL));
@@ -529,3 +515,4 @@ int main(void)
     WSACleanup();
     return 0;
 }
+
