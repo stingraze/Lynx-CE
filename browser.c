@@ -4,6 +4,8 @@
 #include <string.h>
 
 /*
+ (C)Tsubasa Kato - Inspire Search Corporation - 2024
+ Lynx-CE Ver. 0.01
  * Minimal text browser for Windows CE with a Lynx-like prompt:
  *   - Press 'g' to type a URL: e.g. http://example.com/
  *   - Press 'q' to quit
