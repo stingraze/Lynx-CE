@@ -12,3 +12,4 @@ This project was successfully compiled using CeGCC.
 Video on YouTube below:
 
 [![Video of Lynx-CE working on NTT Docomo / NEC Sigmarion 3](https://img.youtube.com/vi/A6zFduoXUJo/0.jpg)](https://www.youtube.com/watch?v=A6zFduoXUJo)
+
