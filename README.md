@@ -9,5 +9,5 @@ Used ChatGPT - o1 to help me make this project work.
 
 This project was successfully compiled using CeGCC.
 
-[[https://www.youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ]
+[https://www.youtube.com/watch?v=dQw4w9WgXcQ](https://www.youtube.com/watch?v=dQw4w9WgXcQ]
 
