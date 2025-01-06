@@ -1,0 +1,5 @@
+arm-mingw32ce-gcc -I/path/to/polarssl/include \
+    -L/path/to/polarssl/library \
+    -o mini_lynx.exe \
+    mini_lynx.c \
+    -lpolarssl -lws2
