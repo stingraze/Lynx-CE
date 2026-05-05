@@ -2,25 +2,14 @@
 #include "winsock2.h"    // Local header, same directory
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
-/*
- (C)Tsubasa Kato - Inspire Search Corporation - 2024
- Lynx-CE Ver. 0.01
- * Minimal text browser for Windows CE with a Lynx-like prompt:
- *   - Press 'g' to type a URL: e.g. http://example.com/
- *   - Press 'q' to quit
- *
- * This code uses no explicit '-lws2' or '-lcoredll'. We assume the CeGCC
- * environment links them automatically. If it doesn't, you'll have to add them.
- *
- * If you see "not a valid application" on the device, you likely have
- * an architecture or subsystem mismatch. See notes at the end.
- */
+#include "image_pipeline.h"
 
 #define HTTP_PORT 80
 
-//------------------------------------------------------------------------------
-// Strips out everything between '<' and '>'. Very naive HTML removal.
+static BrowserConfig g_browser_config = {100, 0, 0, 0};
+
 static void strip_html_tags(char *buffer)
 {
     char *r = buffer;
@@ -29,67 +18,112 @@ static void strip_html_tags(char *buffer)
 
     while (*r)
     {
-        if (*r == '<')
-        {
-            in_tag = 1;
-        }
-        else if (*r == '>')
-        {
-            in_tag = 0;
-        }
-        else if (!in_tag)
-        {
-            *w++ = *r;
-        }
+        if (*r == '<') in_tag = 1;
+        else if (*r == '>') in_tag = 0;
+        else if (!in_tag) *w++ = *r;
         r++;
     }
     *w = '\0';
 }
 
-//------------------------------------------------------------------------------
-// A very naive parser for URLs of the form http://host/path
-// Puts the host part in 'host[]' and path part in 'path[]'.
 static int parse_http_url(const char *url, char *host, char *path, int maxLen)
 {
-    // Check "http://"
-    if (strncmp(url, "http://", 7) != 0)
+    if (strncmp(url, "http://", 7) != 0) return -1;
+
     {
-        // We only handle plain "http://" in this sample
-        return -1;
+        const char *p = url + 7;
+        const char *slash = strchr(p, '/');
+        if (!slash)
+        {
+            strncpy(host, p, maxLen);
+            host[maxLen - 1] = '\0';
+            strcpy(path, "/");
+        }
+        else
+        {
+            int hostLen = (int)(slash - p);
+            if (hostLen <= 0 || hostLen >= maxLen) return -1;
+            strncpy(host, p, hostLen);
+            host[hostLen] = '\0';
+            strncpy(path, slash, maxLen);
+            path[maxLen - 1] = '\0';
+        }
     }
-
-    // Move pointer past "http://"
-    const char *p = url + 7;
-
-    // Find first slash that starts the path
-    const char *slash = strchr(p, '/');
-    if (!slash)
-    {
-        // No slash => only a hostname
-        strncpy(host, p, maxLen);
-        host[maxLen - 1] = '\0';
-        strcpy(path, "/");
-    }
-    else
-    {
-        // Copy the host portion
-        int hostLen = (int)(slash - p);
-        if (hostLen <= 0 || hostLen >= maxLen)
-            return -1;
-
-        strncpy(host, p, hostLen);
-        host[hostLen] = '\0';
-
-        // Copy remainder as the path
-        strncpy(path, slash, maxLen);
-        path[maxLen - 1] = '\0';
-    }
-
     return 0;
 }
 
-//------------------------------------------------------------------------------
-// Sends a GET request to the given URL, reads the response, strips HTML, prints text.
+static void process_image_refs(const char *base_url, const char *html)
+{
+    const char *p = html;
+    while ((p = strstr(p, "<img")) != 0)
+    {
+        const char *src = strstr(p, "src=");
+        if (!src) { p += 4; continue; }
+        src += 4;
+
+        while (*src == ' ' || *src == '\t') src++;
+
+        {
+            char quote = 0;
+            char img_url[512];
+            int i = 0;
+            if (*src == '"' || *src == '\'') {
+                quote = *src;
+                src++;
+            }
+
+            while (*src && i < (int)sizeof(img_url) - 1)
+            {
+                if (quote) {
+                    if (*src == quote) break;
+                } else {
+                    if (*src == ' ' || *src == '>' || *src == '\t') break;
+                }
+                img_url[i++] = *src++;
+            }
+            img_url[i] = '\0';
+
+            if (strncmp(img_url, "http://", 7) == 0)
+            {
+                ImageBuffer src_img;
+                ImageBuffer out_img;
+                printf("\n[image] %s\n", img_url);
+
+                if (image_pipeline_fetch_bmp(img_url, &src_img) == 0)
+                {
+                    printf("  decoded BMP: %dx%d\n", src_img.width, src_img.height);
+                    if (g_browser_config.small_images_enabled)
+                    {
+                        if (image_pipeline_downscale_nearest(&src_img, &out_img, &g_browser_config) == 0)
+                        {
+                            printf("  downscaled: %dx%d (nearest-neighbor)\n", out_img.width, out_img.height);
+                            image_pipeline_free(&out_img);
+                        }
+                        else
+                        {
+                            printf("  downscale skipped/failed\n");
+                        }
+                    }
+                    else
+                    {
+                        printf("  downscale disabled (use --small-images)\n");
+                    }
+                    image_pipeline_free(&src_img);
+                }
+                else
+                {
+                    printf("  fetch/decode failed (currently supports HTTP 24-bit BMP only)\n");
+                }
+            }
+            else
+            {
+                printf("\n[image] skipped non-absolute or non-http src from %s\n", base_url);
+            }
+        }
+        p += 4;
+    }
+}
+
 static void fetch_url(const char *url)
 {
     char host[256] = {0};
@@ -101,7 +135,6 @@ static void fetch_url(const char *url)
         return;
     }
 
-    // Create a TCP socket
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET)
     {
@@ -109,7 +142,6 @@ static void fetch_url(const char *url)
         return;
     }
 
-    // Resolve the hostname
     struct hostent *he = gethostbyname(host);
     if (!he)
     {
@@ -118,14 +150,12 @@ static void fetch_url(const char *url)
         return;
     }
 
-    // Build the server address
     struct sockaddr_in server;
     memset(&server, 0, sizeof(server));
     server.sin_family = AF_INET;
     server.sin_port = htons(HTTP_PORT);
     server.sin_addr.s_addr = *((u_long*)he->h_addr);
 
-    // Connect
     if (connect(s, (struct sockaddr*)&server, sizeof(server)) != 0)
     {
         printf("connect() failed.\n");
@@ -133,64 +163,122 @@ static void fetch_url(const char *url)
         return;
     }
 
-    // Build a minimal HTTP GET request
-    char request[1024];
-    snprintf(request, sizeof(request),
-             "GET %s HTTP/1.0\r\n"
-             "Host: %s\r\n"
-             "Connection: close\r\n"
-             "User-Agent: CE-Lynx/1.0\r\n\r\n",
-             path, host);
-
-    // Send it
-    if (send(s, request, (int)strlen(request), 0) <= 0)
     {
-        printf("send() failed.\n");
-        closesocket(s);
-        return;
+        char request[1024];
+        snprintf(request, sizeof(request),
+                "GET %s HTTP/1.0\r\n"
+                "Host: %s\r\n"
+                "Connection: close\r\n"
+                "User-Agent: CE-Lynx/1.0\r\n\r\n",
+                path, host);
+        if (send(s, request, (int)strlen(request), 0) <= 0)
+        {
+            printf("send() failed.\n");
+            closesocket(s);
+            return;
+        }
     }
 
-    // Read the response, strip headers, remove HTML tags
-    int headers_done = 0;
-    char buffer[1024];
-    int received;
-
-    while ((received = recv(s, buffer, sizeof(buffer) - 1, 0)) > 0)
     {
-        buffer[received] = '\0';
+        int headers_done = 0;
+        char buffer[1024];
+        int received;
+        char html_capture[4096];
+        int html_used = 0;
+        html_capture[0] = '\0';
 
-        if (!headers_done)
+        while ((received = recv(s, buffer, sizeof(buffer) - 1, 0)) > 0)
         {
-            // Look for "\r\n\r\n" to mark end of headers
-            char *body = strstr(buffer, "\r\n\r\n");
-            if (body)
+            buffer[received] = '\0';
+
+            if (!headers_done)
             {
-                headers_done = 1;
-                body += 4;  // skip the \r\n\r\n
-                strip_html_tags(body);
-                printf("%s", body);
+                char *body = strstr(buffer, "\r\n\r\n");
+                if (body)
+                {
+                    int remain;
+                    headers_done = 1;
+                    body += 4;
+                    remain = (int)strlen(body);
+                    if (html_used + remain < (int)sizeof(html_capture) - 1) {
+                        strcpy(html_capture + html_used, body);
+                        html_used += remain;
+                    }
+                    strip_html_tags(body);
+                    printf("%s", body);
+                }
             }
-            // If we haven't seen headers end yet, do nothing with partial data
+            else
+            {
+                int remain = (int)strlen(buffer);
+                if (html_used + remain < (int)sizeof(html_capture) - 1) {
+                    strcpy(html_capture + html_used, buffer);
+                    html_used += remain;
+                }
+                strip_html_tags(buffer);
+                printf("%s", buffer);
+            }
         }
-        else
+
+        printf("\n");
+        if (html_used > 0)
         {
-            // Already reading body
-            strip_html_tags(buffer);
-            printf("%s", buffer);
+            process_image_refs(url, html_capture);
         }
     }
-
-    printf("\n");  // extra newline after printing
 
     closesocket(s);
 }
 
-//------------------------------------------------------------------------------
-// Main function: a simple loop with commands: 'g' to go, 'q' to quit.
-int main(void)
+static int parse_cli_flags(int argc, char **argv, BrowserConfig *cfg)
 {
-    // Initialize Winsock
+    int i;
+    for (i = 1; i < argc; ++i)
+    {
+        const char *arg = argv[i];
+        if (strcmp(arg, "--small-images") == 0)
+        {
+            cfg->small_images_enabled = 1;
+            if (cfg->image_scale_percent <= 0 || cfg->image_scale_percent > 100)
+                cfg->image_scale_percent = 50;
+        }
+        else if (strncmp(arg, "--image-scale=", 14) == 0)
+        {
+            int val = atoi(arg + 14);
+            if (val < 1 || val > 100) return -1;
+            cfg->image_scale_percent = val;
+            cfg->small_images_enabled = 1;
+        }
+        else if (strncmp(arg, "--max-img-width=", 16) == 0)
+        {
+            int val = atoi(arg + 16);
+            if (val < 1) return -1;
+            cfg->max_img_width = val;
+        }
+        else if (strncmp(arg, "--max-img-height=", 17) == 0)
+        {
+            int val = atoi(arg + 17);
+            if (val < 1) return -1;
+            cfg->max_img_height = val;
+        }
+        else
+        {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
     WSADATA wsa;
+    if (parse_cli_flags(argc, argv, &g_browser_config) != 0)
+    {
+        printf("Usage:\n");
+        printf("  browser-lynx.exe [--small-images] [--image-scale=<1-100>] [--max-img-width=<n>] [--max-img-height=<n>]\n");
+        return 1;
+    }
+
     if (WSAStartup(MAKEWORD(2,2), &wsa) != 0)
     {
         printf("WSAStartup failed.\n");
@@ -198,15 +286,19 @@ int main(void)
     }
 
     printf("Minimal CE-Lynx Demo\n");
+    printf("Image pipeline: %s, scale=%d%%, max=%dx%d\n",
+        g_browser_config.small_images_enabled ? "ON" : "OFF",
+        g_browser_config.image_scale_percent,
+        g_browser_config.max_img_width,
+        g_browser_config.max_img_height);
     printf("Press 'g' to enter a URL, or 'q' to quit.\n");
 
     while (1)
     {
+        int c;
         printf("\nCommand (g=Go, q=Quit): ");
-
-        int c = getchar();
-        // Clear out any trailing chars up to newline
-        while (getchar() != '\n') { /* discard extra input */ }
+        c = getchar();
+        while (getchar() != '\n') { }
 
         if (c == 'q' || c == 'Q')
         {
@@ -215,24 +307,21 @@ int main(void)
         }
         else if (c == 'g' || c == 'G')
         {
-            // Prompt user for a URL
             char url[512];
+            size_t len;
             printf("Enter URL (e.g. http://example.com/): ");
             fflush(stdout);
 
-            // Grab a line
             if (fgets(url, sizeof(url), stdin) == NULL)
             {
                 printf("Error reading URL.\n");
                 continue;
             }
 
-            // Remove any trailing newline
-            size_t len = strlen(url);
+            len = strlen(url);
             if (len > 0 && url[len - 1] == '\n')
                 url[len - 1] = '\0';
 
-            // Attempt to fetch
             fetch_url(url);
         }
         else
@@ -244,4 +333,3 @@ int main(void)
     WSACleanup();
     return 0;
 }
-
