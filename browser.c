@@ -2,6 +2,8 @@
 #include "winsock2.h"    // Local header, same directory
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include "net_transport.h"
 
 /*
  (C)Tsubasa Kato - Inspire Search Corporation - 2024
@@ -17,7 +19,6 @@
  * an architecture or subsystem mismatch. See notes at the end.
  */
 
-#define HTTP_PORT 80
 
 //------------------------------------------------------------------------------
 // Strips out everything between '<' and '>'. Very naive HTML removal.
@@ -47,42 +48,50 @@ static void strip_html_tags(char *buffer)
 }
 
 //------------------------------------------------------------------------------
-// A very naive parser for URLs of the form http://host/path
-// Puts the host part in 'host[]' and path part in 'path[]'.
-static int parse_http_url(const char *url, char *host, char *path, int maxLen)
+// URL parser for http:// and https://
+static int parse_url(const char *url, net_scheme_t *scheme, char *host, int hostLen,
+                     char *path, int pathLen, unsigned short *port)
 {
-    // Check "http://"
-    if (strncmp(url, "http://", 7) != 0)
-    {
-        // We only handle plain "http://" in this sample
+    const char *p = NULL;
+    const char *slash = NULL;
+    const char *colon = NULL;
+    char hostport[256] = {0};
+
+    if (strncmp(url, "https://", 8) == 0) {
+        *scheme = NET_SCHEME_HTTPS;
+        *port = 443;
+        p = url + 8;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        *scheme = NET_SCHEME_HTTP;
+        *port = 80;
+        p = url + 7;
+    } else {
         return -1;
     }
 
-    // Move pointer past "http://"
-    const char *p = url + 7;
-
-    // Find first slash that starts the path
-    const char *slash = strchr(p, '/');
-    if (!slash)
-    {
-        // No slash => only a hostname
-        strncpy(host, p, maxLen);
-        host[maxLen - 1] = '\0';
+    slash = strchr(p, '/');
+    if (!slash) {
+        strncpy(hostport, p, sizeof(hostport) - 1);
         strcpy(path, "/");
+    } else {
+        int hpLen = (int)(slash - p);
+        if (hpLen <= 0 || hpLen >= (int)sizeof(hostport)) return -1;
+        strncpy(hostport, p, hpLen);
+        hostport[hpLen] = '\0';
+        strncpy(path, slash, pathLen - 1);
+        path[pathLen - 1] = '\0';
     }
-    else
-    {
-        // Copy the host portion
-        int hostLen = (int)(slash - p);
-        if (hostLen <= 0 || hostLen >= maxLen)
-            return -1;
 
-        strncpy(host, p, hostLen);
-        host[hostLen] = '\0';
-
-        // Copy remainder as the path
-        strncpy(path, slash, maxLen);
-        path[maxLen - 1] = '\0';
+    colon = strchr(hostport, ':');
+    if (colon) {
+        int hLen = (int)(colon - hostport);
+        if (hLen <= 0 || hLen >= hostLen) return -1;
+        strncpy(host, hostport, hLen);
+        host[hLen] = '\0';
+        *port = (unsigned short)atoi(colon + 1);
+    } else {
+        strncpy(host, hostport, hostLen - 1);
+        host[hostLen - 1] = '\0';
     }
 
     return 0;
@@ -90,46 +99,26 @@ static int parse_http_url(const char *url, char *host, char *path, int maxLen)
 
 //------------------------------------------------------------------------------
 // Sends a GET request to the given URL, reads the response, strips HTML, prints text.
-static void fetch_url(const char *url)
+static void fetch_url(const char *url, const net_tls_options_t *tls_opts)
 {
     char host[256] = {0};
     char path[512] = {0};
+    unsigned short port = 0;
+    net_scheme_t scheme;
 
-    if (parse_http_url(url, host, path, 256) != 0)
+    if (parse_url(url, &scheme, host, sizeof(host), path, sizeof(path), &port) != 0)
     {
-        printf("Error: Malformed or unsupported URL. Try something like http://example.com/\n");
+        printf("Error: Malformed or unsupported URL. Try http://example.com/ or https://example.com/\n");
         return;
     }
 
-    // Create a TCP socket
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET)
-    {
-        printf("socket() failed.\n");
-        return;
-    }
+    net_tls_options_t effective_tls = *tls_opts;
+    effective_tls.server_name = host;
 
-    // Resolve the hostname
-    struct hostent *he = gethostbyname(host);
-    if (!he)
-    {
-        printf("gethostbyname() failed for %s\n", host);
-        closesocket(s);
-        return;
-    }
-
-    // Build the server address
-    struct sockaddr_in server;
-    memset(&server, 0, sizeof(server));
-    server.sin_family = AF_INET;
-    server.sin_port = htons(HTTP_PORT);
-    server.sin_addr.s_addr = *((u_long*)he->h_addr);
-
-    // Connect
-    if (connect(s, (struct sockaddr*)&server, sizeof(server)) != 0)
+    net_transport_t transport;
+    if (net_transport_connect(&transport, host, port, scheme, &effective_tls) != 0)
     {
         printf("connect() failed.\n");
-        closesocket(s);
         return;
     }
 
@@ -143,10 +132,10 @@ static void fetch_url(const char *url)
              path, host);
 
     // Send it
-    if (send(s, request, (int)strlen(request), 0) <= 0)
+    if (net_transport_send(&transport, request, (int)strlen(request)) <= 0)
     {
         printf("send() failed.\n");
-        closesocket(s);
+        net_transport_close(&transport);
         return;
     }
 
@@ -155,7 +144,7 @@ static void fetch_url(const char *url)
     char buffer[1024];
     int received;
 
-    while ((received = recv(s, buffer, sizeof(buffer) - 1, 0)) > 0)
+    while ((received = net_transport_recv(&transport, buffer, sizeof(buffer) - 1)) > 0)
     {
         buffer[received] = '\0';
 
@@ -182,12 +171,12 @@ static void fetch_url(const char *url)
 
     printf("\n");  // extra newline after printing
 
-    closesocket(s);
+    net_transport_close(&transport);
 }
 
 //------------------------------------------------------------------------------
 // Main function: a simple loop with commands: 'g' to go, 'q' to quit.
-int main(void)
+int main(int argc, char **argv)
 {
     // Initialize Winsock
     WSADATA wsa;
@@ -195,6 +184,13 @@ int main(void)
     {
         printf("WSAStartup failed.\n");
         return 1;
+    }
+
+    net_tls_options_t tls_opts;
+    memset(&tls_opts, 0, sizeof(tls_opts));
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--tls-insecure") == 0) tls_opts.tls_insecure = 1;
+        else if (strncmp(argv[i], "--ca-bundle=", 12) == 0) tls_opts.ca_bundle_path = argv[i] + 12;
     }
 
     printf("Minimal CE-Lynx Demo\n");
@@ -233,7 +229,7 @@ int main(void)
                 url[len - 1] = '\0';
 
             // Attempt to fetch
-            fetch_url(url);
+            fetch_url(url, &tls_opts);
         }
         else
         {
