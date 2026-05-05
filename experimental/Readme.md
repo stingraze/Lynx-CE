@@ -4,6 +4,8 @@ The code in here has not been tested thoroughly. Please use them with your own r
 
 Update:
 
+5/5/2026: Additional test version by OpenAI Codex made. Not tested to work yet.
+
 9/8/2025:
 GPT-5-Build-Instructions-Untested.md has the build instructions for PolarSSL.
 
