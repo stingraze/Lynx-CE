@@ -3,6 +3,8 @@ Latest source code version is: 0.01.
 
 Just a minimal text browser inspired from Lynx for Windows CE
 
+*Future plans: jpg minizer pipeline activated by a flag.
+
 5/5/2026: 13:27PM JST: 2 PRs: Image (bmp) pipeline & TLS support (both are not tested, will be testing in the next few days to weeks)
 
 9/8/2025 17:03PM JST: There is now the build instructions for experimental (PolarSSL) version. It is untested. Please use it as a reference or a stepping stone.
